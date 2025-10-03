@@ -30,7 +30,7 @@ DELETE_FILES = [
 ]
 FAKE_DIR_NAME = "FAKE"
 
-# Candidate names in "not a crack" folder (try these in order)
+# Candidate names in "not a crack" folder (case-insensitive detection)
 CANDIDATE_EXES = ["FC26_Showcase fixed.exe", "FC26 fixed.exe"]
 
 
@@ -65,7 +65,7 @@ class FC26ManagerApp(tk.Tk):
         ttk.Button(frm, text="Browse", command=self.browse_fc26).grid(row=row, column=2)
         row += 1
 
-        # Buttons: Install, Delete, Launch
+        # Buttons
         btn_frame = ttk.Frame(frm)
         btn_frame.grid(row=row, column=0, columnspan=3, pady=(10, 6), sticky=tk.W)
         ttk.Button(btn_frame, text="Install (apply not a crack → fc26)", command=self.confirm_install).grid(row=0, column=0, padx=6)
@@ -79,7 +79,7 @@ class FC26ManagerApp(tk.Tk):
         self.progress.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 4))
         row += 1
 
-        # Log / status text area
+        # Log area
         ttk.Label(frm, text="Log / Status:").grid(row=row, column=0, sticky=tk.W)
         row += 1
         self.log_text = scrolledtext.ScrolledText(frm, height=18, width=90, wrap=tk.WORD)
@@ -87,7 +87,7 @@ class FC26ManagerApp(tk.Tk):
         self.log("Let's goooo. Script directory: {}".format(self.script_dir))
 
     # ----------------------
-    # UI helper methods
+    # UI helpers
     # ----------------------
     def browse_not_a_crack(self):
         p = filedialog.askdirectory(title="Select 'not a crack' folder")
@@ -117,13 +117,13 @@ class FC26ManagerApp(tk.Tk):
             self.log("Failed to open script folder:", e)
 
     # ----------------------
-    # Confirmation wrappers
+    # Confirmation
     # ----------------------
     def confirm_install(self):
         if not self.not_a_crack_path.get() or not self.fc26_path.get():
             messagebox.showwarning("Missing folders", "Please select both folders first.")
             return
-        if not messagebox.askyesno("Confirm install", 
+        if not messagebox.askyesno("Confirm install",
                                    "This will rename and copy files from 'not a crack' into 'fc26' and may overwrite files in the fc26 folder. Proceed?"):
             return
         threading.Thread(target=self.install_flow, daemon=True).start()
@@ -132,10 +132,42 @@ class FC26ManagerApp(tk.Tk):
         if not self.fc26_path.get():
             messagebox.showwarning("Missing folder", "Please select the 'fc26' folder first.")
             return
-        if not messagebox.askyesno("Confirm delete", 
-                                   "This will delete specific files from the fc26 folder and restore FC26_org.exe -> FC26.exe. Proceed?"):
+        if not messagebox.askyesno("Confirm delete",
+                                   "This will delete specific files from the fc26 folder and restore original exe. Proceed?"):
             return
         threading.Thread(target=self.delete_flow, daemon=True).start()
+
+    # ----------------------
+    # Helper for backing up both exe types in fc26 (on install)
+    # ----------------------
+    def backup_fc26_exes_if_present(self, fc26: Path):
+        """
+        If FC26.exe exists -> rename to FC26_org.exe (remove any existing _org first).
+        If FC26_Showcase.exe exists -> rename to FC26_Showcase_org.exe.
+        """
+        try:
+            # Normal exe
+            normal = fc26 / "FC26.exe"
+            normal_org = fc26 / "FC26_org.exe"
+            if normal.exists():
+                if normal_org.exists():
+                    self.log("Removing existing", normal_org.name, "to allow backup.")
+                    normal_org.unlink()
+                self.log(f"Backing up {normal.name} -> {normal_org.name}")
+                shutil.move(str(normal), str(normal_org))
+
+            # Showcase exe
+            showcase = fc26 / "FC26_Showcase.exe"
+            showcase_org = fc26 / "FC26_Showcase_org.exe"
+            if showcase.exists():
+                if showcase_org.exists():
+                    self.log("Removing existing", showcase_org.name, "to allow backup.")
+                    showcase_org.unlink()
+                self.log(f"Backing up {showcase.name} -> {showcase_org.name}")
+                shutil.move(str(showcase), str(showcase_org))
+        except Exception as e:
+            self.log("Error during backup_fc26_exes_if_present:", e)
+            raise
 
     # ----------------------
     # Core flows
@@ -148,7 +180,6 @@ class FC26ManagerApp(tk.Tk):
 
             self.log("Starting install from:", not_a_crack, "to:", fc26)
 
-            # Validate folders
             if not not_a_crack.exists() or not not_a_crack.is_dir():
                 messagebox.showerror("Error", f"'not a crack' folder does not exist: {not_a_crack}")
                 return
@@ -156,75 +187,93 @@ class FC26ManagerApp(tk.Tk):
                 messagebox.showerror("Error", f"'fc26' folder does not exist: {fc26}")
                 return
 
-            # Find candidate exe in not_a_crack
+            # Detect candidate exe (case-insensitive)
             candidate = None
+            candidate_lower_name = None
             for name in CANDIDATE_EXES:
                 p = not_a_crack / name
                 if p.exists():
                     candidate = p
+                    candidate_lower_name = name.lower()
                     break
+                # also try a case-insensitive scan of directory
+            if candidate is None:
+                # fallback: scan folder for any file whose lower() matches our known patterns
+                for p in not_a_crack.iterdir():
+                    if p.is_file() and p.name.lower() in [s.lower() for s in CANDIDATE_EXES]:
+                        candidate = p
+                        candidate_lower_name = p.name.lower()
+                        break
 
             if candidate is None:
-                messagebox.showerror("Error", f"None of the candidate EXE files were found in {not_a_crack}. Looked for: {CANDIDATE_EXES}")
+                messagebox.showerror("Error", f"None of the candidate EXE files were found in {not_a_crack}.")
                 return
 
             self.log("Found candidate exe in 'not a crack':", candidate.name)
             self.set_progress(10)
 
-            # Rename candidate -> FC26.exe inside not_a_crack
-            fc26_exe_in_not = not_a_crack / "FC26.exe"
-            if fc26_exe_in_not.exists():
-                # make a backup of existing FC26.exe in not_a_crack (avoid overwrite surprise)
-                backup = not_a_crack / "FC26.exe.bak"
-                self.log("Existing FC26.exe in not_a_crack found; creating backup:", backup.name)
-                shutil.move(str(fc26_exe_in_not), str(backup))
-            self.log(f"Renaming {candidate.name} -> FC26.exe inside not_a_crack")
-            candidate.rename(fc26_exe_in_not)
+            # Determine target rename based on which candidate was found
+            if "showcase" in candidate_lower_name:
+                # Found FC26_Showcase fixed.exe
+                new_name = "FC26_Showcase.exe"
+                org_name = "FC26_Showcase_org.exe"
+            else:
+                # Found FC26 fixed.exe
+                new_name = "FC26.exe"
+                org_name = "FC26_org.exe"
+
+            # Rename candidate inside not_a_crack to canonical new_name
+            renamed_candidate = not_a_crack / new_name
+            if renamed_candidate.exists():
+                # keep a small .bak if present to avoid overwrite
+                backup = not_a_crack / (new_name + ".bak")
+                self.log(f"Existing {new_name} in not_a_crack found; creating backup {backup.name}")
+                if backup.exists():
+                    backup.unlink()
+                shutil.move(str(renamed_candidate), str(backup))
+            try:
+                self.log(f"Renaming {candidate.name} -> {new_name} inside not_a_crack")
+                candidate.rename(renamed_candidate)
+            except Exception as e:
+                self.log("Failed to rename candidate in not_a_crack:", e)
+                raise
+
             self.set_progress(25)
 
-            # In fc26: if FC26.exe exists, rename to FC26_org.exe (backup of original)
-            fc26_exe = fc26 / "FC26.exe"
-            fc26_org = fc26 / "FC26_org.exe"
-            if fc26_exe.exists():
-                # if FC26_org.exe already exists, create incremented backup to avoid loss
-                if fc26_org.exists():
-                    i = 1
-                    while (fc26.parent / f"FC26_org_{i}.exe").exists():
-                        i += 1
-                    new_backup = fc26.parent / f"FC26_org_{i}.exe"
-                    self.log("FC26_org.exe already exists; moving existing FC26_org.exe ->", new_backup.name)
-                    shutil.move(str(fc26_org), str(new_backup))
-                self.log("Renaming existing fc26/FC26.exe -> FC26_org.exe")
-                shutil.move(str(fc26_exe), str(fc26_org))
-            else:
-                self.log("No FC26.exe present in fc26 folder; continuing.")
+            # In fc26: backup any existing FC26.exe and/or FC26_Showcase.exe as required by your spec
+            self.backup_fc26_exes_if_present(fc26)
+            self.set_progress(40)
 
-            self.set_progress(45)
-
-            # Copy all files from not_a_crack into fc26 (overwrite)
-            self.log("Copying files from 'not a crack' into fc26 (this will overwrite existing files).")
+            # Now copy all files from not_a_crack into fc26 (overwrite)
+            self.log("Copying files from 'not a crack' into fc26 (overwrite).")
             files = list(not_a_crack.iterdir())
             total = max(len(files), 1)
-            done = 0
-            for item in files:
+            for i, item in enumerate(files, start=1):
                 dest = fc26 / item.name
-                # If item is directory, copytree (overwrite by removing existing)
-                if item.is_dir():
-                    if dest.exists():
-                        shutil.rmtree(dest)
-                    shutil.copytree(item, dest)
-                    self.log("Copied folder:", item.name)
-                else:
-                    shutil.copy2(item, dest)
-                    self.log("Copied file:", item.name)
-                done += 1
-                self.set_progress(45 + int(45 * done / total))
+                try:
+                    if item.is_dir():
+                        # remove dest dir then copy
+                        if dest.exists():
+                            if dest.is_dir():
+                                shutil.rmtree(dest)
+                            else:
+                                dest.unlink()
+                        shutil.copytree(item, dest)
+                    else:
+                        # ensure dest parent exists
+                        dest_parent = dest.parent
+                        dest_parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(item, dest)
+                    self.log("Copied:", item.name)
+                except Exception as e:
+                    self.log("Failed to copy", item.name, ":", e)
+                self.set_progress(40 + int(50 * i / total))
 
             self.set_progress(95)
-            self.log("Install flow complete. Finalizing...")
-
+            self.log("Install flow complete.")
             messagebox.showinfo("Install complete", "Install operation completed successfully.")
             self.set_progress(100)
+
         except Exception as e:
             self.log("Error in install_flow:", e)
             self.log(traceback.format_exc())
@@ -232,6 +281,15 @@ class FC26ManagerApp(tk.Tk):
             self.set_progress(0)
 
     def delete_flow(self):
+        """
+        Delete the 'not a crack' files per DELETE_FILES & FAKE folder,
+        then detect which *_org.exe files exist and restore them:
+
+        - If FC26_org.exe exists: delete FC26.exe (if present) then rename FC26_org.exe -> FC26.exe
+        - If FC26_Showcase_org.exe exists: delete FC26_Showcase.exe (if present) then rename FC26_Showcase_org.exe -> FC26_Showcase.exe
+
+        If both *_org.exe exist, perform both restores.
+        """
         try:
             self.set_progress(0)
             fc26 = Path(self.fc26_path.get())
@@ -242,28 +300,22 @@ class FC26ManagerApp(tk.Tk):
                 return
 
             # Delete listed files
-            total = len(DELETE_FILES) + 2
-            done = 0
-            for f in DELETE_FILES:
+            for i, f in enumerate(DELETE_FILES, start=1):
                 p = fc26 / f
                 if p.exists():
                     try:
                         if p.is_file() or p.is_symlink():
                             p.unlink()
-                            self.log("Deleted:", p.name)
                         elif p.is_dir():
                             shutil.rmtree(p)
-                            self.log("Deleted directory (unexpectedly named like file):", p.name)
+                        self.log("Deleted:", p.name)
                     except Exception as e:
                         self.log("Failed to delete", p.name, ":", e)
-                else:
-                    self.log("Not present (skipping):", p.name)
-                done += 1
-                self.set_progress(int(80 * done / total))
+                self.set_progress(int(50 * i / len(DELETE_FILES)))
 
-            # Delete FAKE folder if exists
+            # Delete FAKE folder
             fake = fc26 / FAKE_DIR_NAME
-            if fake.exists() and fake.is_dir():
+            if fake.exists():
                 try:
                     shutil.rmtree(fake)
                     self.log("Deleted FAKE folder.")
@@ -272,29 +324,56 @@ class FC26ManagerApp(tk.Tk):
             else:
                 self.log("No FAKE folder found.")
 
-            done += 1
-            self.set_progress(int(80 * done / total))
+            self.set_progress(65)
 
-            # Rename FC26_org.exe back to FC26.exe if present
-            fc26_org = fc26 / "FC26_org.exe"
-            fc26_exe = fc26 / "FC26.exe"
-            if fc26_org.exists():
-                if fc26_exe.exists():
-                    # remove existing FC26.exe before restore
+            # Restore logic: check both _org exe files and restore accordingly
+            restored_any = False
+
+            # 1) Restore normal exe if backup exists
+            normal_org = fc26 / "FC26_org.exe"
+            normal_exe = fc26 / "FC26.exe"
+            if normal_org.exists():
+                # delete current FC26.exe if present
+                if normal_exe.exists():
                     try:
-                        fc26_exe.unlink()
-                        self.log("Removed leftover FC26.exe to restore original.")
+                        normal_exe.unlink()
+                        self.log("Deleted current FC26.exe to allow restore from FC26_org.exe")
                     except Exception as e:
-                        self.log("Could not remove existing FC26.exe:", e)
-                shutil.move(str(fc26_org), str(fc26_exe))
-                self.log("Restored:", fc26_exe.name)
-            else:
-                self.log("No FC26_org.exe found to restore.")
+                        self.log("Failed to delete FC26.exe before restore:", e)
+                # move backup -> original name
+                try:
+                    shutil.move(str(normal_org), str(normal_exe))
+                    self.log("Restored FC26_org.exe -> FC26.exe")
+                    restored_any = True
+                except Exception as e:
+                    self.log("Failed to restore FC26_org.exe -> FC26.exe:", e)
 
-            done += 1
+            # 2) Restore showcase exe if backup exists
+            showcase_org = fc26 / "FC26_Showcase_org.exe"
+            showcase_exe = fc26 / "FC26_Showcase.exe"
+            if showcase_org.exists():
+                # delete current FC26_Showcase.exe if present
+                if showcase_exe.exists():
+                    try:
+                        showcase_exe.unlink()
+                        self.log("Deleted current FC26_Showcase.exe to allow restore from FC26_Showcase_org.exe")
+                    except Exception as e:
+                        self.log("Failed to delete FC26_Showcase.exe before restore:", e)
+                # move backup -> original name
+                try:
+                    shutil.move(str(showcase_org), str(showcase_exe))
+                    self.log("Restored FC26_Showcase_org.exe -> FC26_Showcase.exe")
+                    restored_any = True
+                except Exception as e:
+                    self.log("Failed to restore FC26_Showcase_org.exe -> FC26_Showcase.exe:", e)
+
+            if not restored_any:
+                self.log("No *_org.exe found to restore.")
+
             self.set_progress(100)
             self.log("Delete flow complete.")
             messagebox.showinfo("Delete complete", "Delete operation finished.")
+
         except Exception as e:
             self.log("Error in delete_flow:", e)
             self.log(traceback.format_exc())
@@ -305,13 +384,11 @@ class FC26ManagerApp(tk.Tk):
     # Launch EDTD
     # ----------------------
     def launch_edtd(self):
-        # EDTD.exe expected in same folder as this script
         edt_path = self.script_dir / "EDTD.exe"
         if not edt_path.exists():
             messagebox.showerror("Missing EDTD.exe", f"EDTD.exe not found in script folder:\n{edt_path}")
             return
         try:
-            # Launch edt as a separate process without blocking the GUI
             subprocess.Popen([str(edt_path)], cwd=str(self.script_dir))
             self.log("Launched EDTD.exe:", edt_path)
         except Exception as e:
